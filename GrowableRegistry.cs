@@ -6,7 +6,6 @@ using Silverpine.ModdingTools;
 using SilverpineMods.CustomItemLoader;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -185,6 +184,16 @@ internal static class GrowableRegistry
             }
             else
             {
+                string modelPath = CustomItemApi.ResolveGlbModelSourcePath(
+                    definition.PackDirectory,
+                    stage.model!,
+                    requireExists: false);
+                if (!File.Exists(modelPath))
+                    throw new InvalidDataException(
+                        $"Growable '{definition.QualifiedId}' stage {index} " +
+                        "has no source GLB and its CIL distribution cache " +
+                        "could not be loaded. Render the stage preview before " +
+                        "distributing the cache-only pack.");
                 stage.RuntimeSprite = index > 0
                     ? definition.stages[index - 1].RuntimeSprite
                     : fallback;
@@ -200,30 +209,29 @@ internal static class GrowableRegistry
         GrowableStageDefinition stage,
         out Sprite sprite)
     {
-        GetGlbStageCachePaths(
-            definition,
-            index,
-            out string imagePath,
-            out string keyPath);
         sprite = null!;
         try
         {
-            if (!File.Exists(imagePath) || !File.Exists(keyPath) ||
-                !string.Equals(
-                    File.ReadAllText(keyPath).Trim(),
-                    ComputeGlbStageCacheKey(stage),
-                    StringComparison.Ordinal))
+            if (!CustomItemApi.TryLoadCachedGlbSprite(
+                    definition.PackDirectory,
+                    definition.PackId,
+                    definition.ItemId,
+                    stage.model!,
+                    stage.ModelRotation,
+                    stage.zoom,
+                    stage.resolution,
+                    definition.QualifiedId + ":stage:" + index + ":glb-cache",
+                    GrowableDefinition.GetStageCacheSuffix(index),
+                    out Sprite cached))
                 return false;
-            sprite = LoadCustomSprite(
-                imagePath,
-                definition.QualifiedId + ":stage:" + index + ":glb-cache",
-                stage);
+            sprite = ApplyStageSpriteSettings(cached, stage);
             return true;
         }
         catch (Exception exception)
         {
             Plugin.Log.LogWarning(
-                $"Ignoring invalid growable GLB cache '{imagePath}': " +
+                $"Ignoring invalid CIL growable cache for " +
+                $"'{definition.QualifiedId}' stage {index}: " +
                 exception.Message);
             return false;
         }
@@ -240,13 +248,16 @@ internal static class GrowableRegistry
             {
                 string spriteName = definition.QualifiedId + ":stage:" +
                     index + ":glb";
-                Sprite rendered = await CustomItemApi.RenderGlbSpriteAsync(
+                Sprite rendered = await CustomItemApi.RenderAndCacheGlbSpriteAsync(
+                    definition.PackDirectory,
+                    definition.PackId,
+                    definition.ItemId,
                     stage.model!,
                     stage.ModelRotation,
                     stage.zoom,
                     stage.resolution,
-                    spriteName);
-                TryWriteGlbStageCache(definition, index, stage, rendered);
+                    spriteName,
+                    GrowableDefinition.GetStageCacheSuffix(index));
                 Sprite adjusted = ApplyStageSpriteSettings(rendered, stage);
                 stage.RuntimeSprite = adjusted;
                 RefreshDefinitionArt(definition, index, adjusted);
@@ -294,89 +305,6 @@ internal static class GrowableRegistry
         foreach (CustomGrowable growable in
                  Resources.FindObjectsOfTypeAll<CustomGrowable>())
             growable.RefreshArt(definition.QualifiedId);
-    }
-
-    private static void TryWriteGlbStageCache(
-        GrowableDefinition definition,
-        int index,
-        GrowableStageDefinition stage,
-        Sprite rendered)
-    {
-        GetGlbStageCachePaths(
-            definition,
-            index,
-            out string imagePath,
-            out string keyPath);
-        string imageTemporary = imagePath + ".tmp";
-        string keyTemporary = keyPath + ".tmp";
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(imagePath)!);
-            File.WriteAllBytes(imageTemporary, rendered.texture.EncodeToPNG());
-            File.WriteAllText(keyTemporary, ComputeGlbStageCacheKey(stage));
-            File.Copy(imageTemporary, imagePath, overwrite: true);
-            File.Copy(keyTemporary, keyPath, overwrite: true);
-        }
-        catch (Exception exception)
-        {
-            Plugin.Log.LogWarning(
-                $"Could not cache growable GLB stage '{imagePath}': " +
-                exception.Message);
-        }
-        finally
-        {
-            TryDeleteTemporaryCacheFile(imageTemporary);
-            TryDeleteTemporaryCacheFile(keyTemporary);
-        }
-    }
-
-    private static void TryDeleteTemporaryCacheFile(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-                File.Delete(path);
-        }
-        catch (Exception exception)
-        {
-            Plugin.Log.LogWarning(
-                $"Could not remove temporary growable cache file '{path}': " +
-                exception.Message);
-        }
-    }
-
-    private static void GetGlbStageCachePaths(
-        GrowableDefinition definition,
-        int index,
-        out string imagePath,
-        out string keyPath)
-    {
-        string cacheDirectory = Path.Combine(definition.PackDirectory, ".cache");
-        string cacheName = definition.PrefabName + "__stage_" + index;
-        imagePath = Path.Combine(cacheDirectory, cacheName + ".png");
-        keyPath = Path.Combine(cacheDirectory, cacheName + ".key");
-    }
-
-    private static string ComputeGlbStageCacheKey(
-        GrowableStageDefinition stage)
-    {
-        using SHA256 sha = SHA256.Create();
-        byte[] modelHash;
-        using (FileStream stream = File.OpenRead(stage.model!))
-            modelHash = sha.ComputeHash(stream);
-        Vector3 rotation = stage.ModelRotation;
-        string settings = CustomItemApi.GlbSpriteRendererVersion + "|" +
-            Convert.ToBase64String(modelHash) + "|" +
-            rotation.x.ToString("R", CultureInfo.InvariantCulture) + "|" +
-            rotation.y.ToString("R", CultureInfo.InvariantCulture) + "|" +
-            rotation.z.ToString("R", CultureInfo.InvariantCulture) + "|" +
-            stage.zoom.ToString("R", CultureInfo.InvariantCulture) + "|" +
-            stage.resolution + "|" +
-            stage.pixelsPerUnit.ToString("R", CultureInfo.InvariantCulture) +
-            "|" + stage.pivotX.ToString("R", CultureInfo.InvariantCulture) +
-            "|" + stage.pivotY.ToString("R", CultureInfo.InvariantCulture);
-        return Convert.ToBase64String(
-            sha.ComputeHash(Encoding.UTF8.GetBytes(settings)));
     }
 
     private static Sprite ResolveBaseGameSprite(string nameOrPath)

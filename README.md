@@ -1,6 +1,6 @@
 # Custom Growables
 
-A BepInEx add-on for Silverpine 1.7.3 and Custom Item Loader 2.7.0. It turns
+A BepInEx add-on for Silverpine 1.7.3 and Custom Item Loader 2.9.0. It turns
 ordinary Custom Item Loader items into plantable, persistent growables by
 reading an optional `growable` block from the same item definition.
 
@@ -27,7 +27,7 @@ Custom Growables supports:
 
 - BepInEx for Silverpine 1.7.3
 - Silverpine Modding Tools 1.4.0 or newer
-- Custom Item Loader 2.7.0 or newer
+- Custom Item Loader 2.9.0 or newer
 
 Install `CustomGrowables.dll` in:
 
@@ -35,11 +35,17 @@ Install `CustomGrowables.dll` in:
 BepInEx/plugins/CustomGrowables/
 ```
 
-Keep item packs and all custom images or GLBs in Custom Item Loader's normal
-folder:
+Keep item packs and custom images in Custom Item Loader's normal folder:
 
 ```text
 BepInEx/config/CustomItemLoader/
+```
+
+Source GLBs are authoring assets shared with Custom Item Loader and are kept
+outside distributable packs in:
+
+```text
+BepInEx/config/CustomItemLoaderModels/
 ```
 
 ## In-game Growables Editor
@@ -60,9 +66,10 @@ selection controls. Larger catalogs open a searchable selection screen:
 
 - The harvest-item picker includes both registered CIL items and base-game
   items, while the text field remains available for direct ID/name entry.
-- The artwork picker lists the native prefab sprite catalog plus existing
-  PNG/JPG/JPEG images and GLB models in the owning CIL pack. `Import Image /
-  GLB` copies new art into the pack's `assets` folder. GLB stages expose
+- The artwork picker lists the native prefab sprite catalog, pack PNG/JPG/JPEG
+  images, and GLBs from CIL's shared authoring-model library. `Import Image /
+  GLB` copies images into the pack and imports GLBs into
+  `CustomItemLoaderModels` with readable hash-suffixed filenames. GLB stages expose
   rotation, zoom, resolution, and a one-direction preview; they do not require
   front/back/left/right variants. The preview places the plant over
   Silverpine's native one-tile grass turf at its configured world size.
@@ -161,10 +168,13 @@ art source:
   not scan or bulk-load Silverpine's enormous full sprite library.
 - `image`: PNG, JPG, or JPEG path relative to the item-pack JSON. The path
   cannot leave the pack directory.
-- `model`: GLB path relative to the item-pack JSON. Custom Item Loader renders
-  one transparent, tightly cropped sprite from `rotation`, `zoom`, and
-  `resolution`. The result is cached inside the pack's `.cache` folder and is
-  reused until the model or render settings change.
+- `model`: Relative GLB reference in CIL's shared
+  `BepInEx/config/CustomItemLoaderModels` authoring library. Custom Item Loader
+  renders one transparent, tightly cropped sprite from `rotation`, `zoom`, and
+  `resolution`. The deterministic PNG/key pair is cached inside the pack's
+  `.cache` folder and reused until the model or render settings change. Legacy
+  pack-relative GLBs are imported into shared storage when the growable is
+  resaved, without deleting the legacy source file.
 
 Examples of native sprite names include:
 
@@ -183,6 +193,18 @@ GLB art default to 32 pixels per unit and a centered `(0.5, 0.5)` pivot; overrid
 GLB-specific stage fields are `rotation` (`[x, y, z]`, default
 `[20, 135, 0]`), `zoom` (default `1`), and `resolution` (default `512`). Unlike
 turnable items or furniture, a growable generates only this one view.
+
+`Load Cached Preview` displays the current CIL cache without rerendering.
+`Render GLB Preview` uses the shared source model and updates the stage's
+distributable cache. A released growable pack may omit the authoring GLB as long
+as its `.cache` PNG remains present; cache-only consumers load that PNG exactly
+as Custom Item Loader does for ordinary GLB items.
+
+Growable stage caches follow CIL's deterministic naming convention:
+
+```text
+<pack folder>/.cache/<pack-id>__<item-id>__growable_stage_<index>.png
+```
 
 Every stage also accepts `scale` from `0.1` to `10` (default `1`). This is a
 multiplier: an overall growable scale of `1.5` and stage scale of `0.5` display
