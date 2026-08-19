@@ -2,6 +2,7 @@
 
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using SilverpineMods.CustomItemLoader;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -48,6 +49,15 @@ internal sealed class GrowableDefinition
     [JsonIgnore]
     internal string PackDirectory = "";
 
+    [JsonIgnore]
+    internal string PackId = "";
+
+    [JsonIgnore]
+    internal string ItemId = "";
+
+    internal static string GetStageCacheSuffix(int stageIndex) =>
+        "__growable_stage_" + stageIndex;
+
     internal bool IsHarvestReady(int stageIndex) =>
         stages != null && stageIndex >= stages.Count - 1;
 
@@ -89,6 +99,12 @@ internal sealed class GrowableDefinition
     {
         QualifiedId = qualifiedId;
         PackDirectory = Path.GetDirectoryName(jsonPath)!;
+        int separator = qualifiedId.IndexOf(':');
+        if (separator <= 0 || separator >= qualifiedId.Length - 1)
+            throw new InvalidDataException(
+                $"Growable item ID '{qualifiedId}' is not a qualified CIL ID.");
+        PackId = qualifiedId.Substring(0, separator);
+        ItemId = qualifiedId.Substring(separator + 1);
         DisplayName = string.IsNullOrWhiteSpace(visibleName)
             ? qualifiedId
             : visibleName!.Trim();
@@ -105,6 +121,8 @@ internal sealed class GrowableDefinition
         for (int index = 0; index < stages.Count; index++)
             stages[index].Validate(
                 jsonPath,
+                PackId,
+                ItemId,
                 index,
                 finalStage: index == stages.Count - 1);
 
@@ -166,6 +184,8 @@ internal sealed class GrowableStageDefinition
 
     internal void Validate(
         string jsonPath,
+        string packId,
+        string itemId,
         int index,
         bool finalStage)
     {
@@ -210,39 +230,56 @@ internal sealed class GrowableStageDefinition
             throw new InvalidDataException(
                 $"growable.stages[{index}].scale must be between 0.1 and 10.");
 
-        if (hasImage || hasModel)
+        if (hasImage)
         {
             string packDirectory = Path.GetDirectoryName(jsonPath)!;
             string root = Path.GetFullPath(packDirectory)
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
                 Path.DirectorySeparatorChar;
-            string relativePath = hasImage ? image! : model!;
+            string relativePath = image!;
             string fullPath = Path.GetFullPath(
                 Path.Combine(packDirectory, relativePath));
             if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
-                    $"growable.stages[{index}].{(hasImage ? "image" : "model")} " +
+                    $"growable.stages[{index}].image " +
                     "cannot leave its pack folder.");
             if (!File.Exists(fullPath))
                 throw new FileNotFoundException(
-                    $"Growable stage {(hasImage ? "image" : "GLB model")} " +
-                    $"does not exist: {fullPath}",
+                    $"Growable stage image does not exist: {fullPath}",
                     fullPath);
             string extension = Path.GetExtension(fullPath);
-            if (hasImage &&
-                !extension.Equals(".png", StringComparison.OrdinalIgnoreCase) &&
+            if (!extension.Equals(".png", StringComparison.OrdinalIgnoreCase) &&
                 !extension.Equals(".jpg", StringComparison.OrdinalIgnoreCase) &&
                 !extension.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
                     $"growable.stages[{index}].image must be PNG, JPG, or JPEG.");
-            if (hasModel &&
-                !extension.Equals(".glb", StringComparison.OrdinalIgnoreCase))
+            image = fullPath;
+        }
+        else if (hasModel)
+        {
+            string modelReference = model!.Trim()
+                .Replace(Path.DirectorySeparatorChar, '/');
+            if (!Path.GetExtension(modelReference).Equals(
+                    ".glb",
+                    StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
                     $"growable.stages[{index}].model must be a GLB file.");
-            if (hasImage)
-                image = fullPath;
-            else
-                model = fullPath;
+            string packDirectory = Path.GetDirectoryName(jsonPath)!;
+            string sourcePath = CustomItemApi.ResolveGlbModelSourcePath(
+                packDirectory,
+                modelReference,
+                requireExists: false);
+            string cachePath = CustomItemApi.GetGlbSpriteCachePath(
+                packDirectory,
+                packId,
+                itemId,
+                GrowableDefinition.GetStageCacheSuffix(index));
+            if (!File.Exists(sourcePath) && !File.Exists(cachePath))
+                throw new FileNotFoundException(
+                    $"Growable stage {index} has no shared authoring GLB and " +
+                    $"no distributable cached sprite: {cachePath}",
+                    sourcePath);
+            model = modelReference;
         }
         else
         {

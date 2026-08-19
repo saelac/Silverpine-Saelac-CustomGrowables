@@ -589,9 +589,14 @@ internal sealed class GrowableEditorUI : ModToolBehaviour
             GUILayout.EndHorizontal();
             GUILayout.Label(
                 "The GLB is rendered once from this camera rotation. " +
-                "Growables do not generate directional variants.",
+                "Growables do not generate directional variants. Source " +
+                "models are kept in CIL's shared authoring library; rendered " +
+                "stage sprites are stored in this pack's .cache folder.",
                 GUI.skin.box);
 
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Load Cached Preview"))
+                LoadCachedGlbPreview(stage, index);
             GUI.enabled = !renderingGlbPreview;
             if (GUILayout.Button(
                     renderingGlbPreview
@@ -599,6 +604,7 @@ internal sealed class GrowableEditorUI : ModToolBehaviour
                         : "Render GLB preview"))
                 RenderGlbPreview(stage, index);
             GUI.enabled = true;
+            GUILayout.EndHorizontal();
             if (glbPreviewStage == index && glbPreview != null)
                 DrawStageWorldPreview(glbPreview, stage);
         }
@@ -982,23 +988,27 @@ internal sealed class GrowableEditorUI : ModToolBehaviour
                          value,
                          ".png",
                          ".jpg",
-                         ".jpeg",
-                         ".glb"))
+                         ".jpeg"))
                      .OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
             {
                 string relative = MakeRelativePath(packFolder, path)
                     .Replace(Path.DirectorySeparatorChar, '/');
-                bool isGlb = HasExtension(path, ".glb");
                 options.Add(new PickerOption
                 {
-                    Value = (isGlb ? "model|" : "image|") + relative,
-                    Label = (isGlb ? "Pack GLB • " : "Pack image • ") +
-                        relative,
-                    SearchText = (isGlb
-                        ? "custom pack glb model 3d sprite "
-                        : "custom pack image sprite ") + relative
+                    Value = "image|" + relative,
+                    Label = "Pack image • " + relative,
+                    SearchText = "custom pack image sprite " + relative
                 });
             }
+
+        foreach (string modelReference in
+                 CustomItemApi.GetStoredGlbModelReferences())
+            options.Add(new PickerOption
+            {
+                Value = "model|" + modelReference,
+                Label = "Shared CIL GLB • " + modelReference,
+                SearchText = "shared cil glb model 3d sprite " + modelReference
+            });
 
         string current = !string.IsNullOrWhiteSpace(stage.image)
             ? "image|" + stage.image
@@ -1133,6 +1143,7 @@ internal sealed class GrowableEditorUI : ModToolBehaviour
                         "that inherits Silverpine's native " +
                         "ItemComponent_Seeds. Use a component-free clone or " +
                         "custom artwork.");
+                NormalizeModelSources();
                 string candidate = JsonConvert.SerializeObject(
                     definition,
                     Formatting.None,
@@ -1190,29 +1201,17 @@ internal sealed class GrowableEditorUI : ModToolBehaviour
         {
             string folder = Path.GetFullPath(
                 Path.GetDirectoryName(selectedItem.SourceJsonPath)!);
-            string modelPath = Path.GetFullPath(
-                Path.Combine(folder, stage.model!));
-            string folderPrefix = folder.TrimEnd(
-                Path.DirectorySeparatorChar,
-                Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            if (!modelPath.StartsWith(
-                    folderPrefix,
-                    StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException(
-                    "The GLB model must stay inside the item pack folder.");
-            if (!HasExtension(modelPath, ".glb"))
-                throw new InvalidDataException("The model must be a .glb file.");
-            if (!File.Exists(modelPath))
-                throw new FileNotFoundException(
-                    "The GLB model does not exist.",
-                    modelPath);
-
-            Sprite rendered = await CustomItemApi.RenderGlbSpriteAsync(
-                modelPath,
+            NormalizeModelSource(stage, folder);
+            Sprite rendered = await CustomItemApi.RenderAndCacheGlbSpriteAsync(
+                folder,
+                selectedItem.PackId,
+                selectedItem.ItemId,
+                stage.model!,
                 stage.ModelRotation,
                 stage.zoom,
                 stage.resolution,
-                "custom_growable_editor_preview");
+                "custom_growable_editor_preview",
+                GrowableDefinition.GetStageCacheSuffix(stageIndex));
             if (!open || selectedItem == null ||
                 !selectedItem.QualifiedId.Equals(
                     selectedId,
@@ -1225,7 +1224,9 @@ internal sealed class GrowableEditorUI : ModToolBehaviour
             ClearGlbPreview();
             glbPreview = rendered;
             glbPreviewStage = stageIndex;
-            status = "Rendered one-direction GLB preview.";
+            status =
+                "Rendered one-direction GLB preview and updated its CIL " +
+                "distribution cache.";
         }
         catch (Exception exception)
         {
@@ -1237,6 +1238,83 @@ internal sealed class GrowableEditorUI : ModToolBehaviour
         {
             renderingGlbPreview = false;
         }
+    }
+
+    private void LoadCachedGlbPreview(
+        GrowableStageDefinition stage,
+        int stageIndex)
+    {
+        if (selectedItem == null || string.IsNullOrWhiteSpace(stage.model))
+        {
+            status = "Choose or import a GLB model first.";
+            return;
+        }
+        try
+        {
+            string folder = Path.GetFullPath(
+                Path.GetDirectoryName(selectedItem.SourceJsonPath)!);
+            if (!CustomItemApi.TryLoadCachedGlbSprite(
+                    folder,
+                    selectedItem.PackId,
+                    selectedItem.ItemId,
+                    stage.model!,
+                    stage.ModelRotation,
+                    stage.zoom,
+                    stage.resolution,
+                    "custom_growable_editor_cached_preview",
+                    GrowableDefinition.GetStageCacheSuffix(stageIndex),
+                    out Sprite cached))
+            {
+                status =
+                    "No valid cached sprite exists for this model and its " +
+                    "current render settings.";
+                return;
+            }
+            ClearGlbPreview();
+            glbPreview = cached;
+            glbPreviewStage = stageIndex;
+            status = "Loaded the CIL cached stage sprite.";
+        }
+        catch (Exception exception)
+        {
+            status = "Cached preview failed: " + exception.Message;
+            Plugin.Log.LogError(
+                "Growables editor cached GLB preview failed: " + exception);
+        }
+    }
+
+    private void NormalizeModelSources()
+    {
+        if (selectedItem == null || definition?.stages == null)
+            return;
+        string folder = Path.GetFullPath(
+            Path.GetDirectoryName(selectedItem.SourceJsonPath)!);
+        foreach (GrowableStageDefinition stage in definition.stages)
+            if (!string.IsNullOrWhiteSpace(stage.model))
+                NormalizeModelSource(stage, folder, requireSource: false);
+    }
+
+    private void NormalizeModelSource(
+        GrowableStageDefinition stage,
+        string packFolder,
+        bool requireSource = true)
+    {
+        if (string.IsNullOrWhiteSpace(stage.model) ||
+            CustomItemApi.IsGlbModelSourceStored(stage.model!))
+            return;
+        string sourcePath = CustomItemApi.ResolveGlbModelSourcePath(
+            packFolder,
+            stage.model!,
+            requireExists: requireSource);
+        if (!File.Exists(sourcePath))
+            return;
+        string storedReference = CustomItemApi.ImportGlbModelSource(sourcePath);
+        if (stage.model.Equals(
+                storedReference,
+                StringComparison.OrdinalIgnoreCase))
+            return;
+        stage.model = storedReference;
+        MarkDirty();
     }
 
     private void DrawStageWorldPreview(
@@ -1432,27 +1510,30 @@ internal sealed class GrowableEditorUI : ModToolBehaviour
                     {
                         string folder = Path.GetDirectoryName(
                             selectedItem.SourceJsonPath)!;
-                        string assets = Path.Combine(folder, "assets");
-                        Directory.CreateDirectory(assets);
-                        string destination = Path.Combine(
-                            assets,
-                            Path.GetFileName(selected));
-                        if (!Path.GetFullPath(selected).Equals(
-                                Path.GetFullPath(destination),
-                                StringComparison.OrdinalIgnoreCase))
-                            File.Copy(selected, destination, overwrite: true);
-                        string relative = MakeRelativePath(folder, destination)
-                            .Replace(Path.DirectorySeparatorChar, '/');
-                        if (HasExtension(destination, ".glb"))
+                        if (HasExtension(selected, ".glb"))
                         {
-                            stage.model = relative;
+                            stage.model =
+                                CustomItemApi.ImportGlbModelSource(selected);
                             stage.image = null;
                             stage.sprite = null;
                             stage.rotation ??= new[] { 20f, 135f, 0f };
-                            status = "Imported GLB model as " + stage.model;
+                            status =
+                                "Imported shared CIL authoring model as " +
+                                stage.model;
                         }
                         else
                         {
+                            string assets = Path.Combine(folder, "assets");
+                            Directory.CreateDirectory(assets);
+                            string destination = Path.Combine(
+                                assets,
+                                Path.GetFileName(selected));
+                            if (!Path.GetFullPath(selected).Equals(
+                                    Path.GetFullPath(destination),
+                                    StringComparison.OrdinalIgnoreCase))
+                                File.Copy(selected, destination, overwrite: true);
+                            string relative = MakeRelativePath(folder, destination)
+                                .Replace(Path.DirectorySeparatorChar, '/');
                             stage.image = relative;
                             stage.model = null;
                             stage.sprite = null;
